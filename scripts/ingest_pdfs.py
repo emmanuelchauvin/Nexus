@@ -106,8 +106,13 @@ def ingest_pdf(pdf_path: str) -> bool:
     Extracts text from a single PDF file, chunks it, and ingests it into Nexus.
     """
     filename = os.path.basename(pdf_path)
-    print(f"\nIngesting file: {filename}...")
+    doc_id = f"doc_{filename.replace('.', '_').replace(' ', '_')}"
     
+    if memory.graph_store.get_node(doc_id) is not None:
+        print(f"File {filename} has already been ingested. Skipping.")
+        return True
+        
+    print(f"\nIngesting file: {filename}...")
     try:
         reader = PdfReader(pdf_path)
         full_text = ""

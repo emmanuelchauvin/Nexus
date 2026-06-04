@@ -1,0 +1,12 @@
+openai
+python-dotenv
+langgraph
+chromadb
+networkx
+pydantic>=2.0
+pytest
+pytest-asyncio
+fastapi
+uvicorn
+pypdf
+python-multipart

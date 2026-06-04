@@ -1,0 +1,29 @@
+# Environments
+.venv/
+env/
+venv/
+ENV/
+
+# Python caching
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local databases/storage
+.nexus_storage/
+
+# Local env keys
+.env
+
+# Node.js
+node_modules/
+dist/
+
+# Editor files
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

@@ -56,6 +56,7 @@ memory = HybridMemory(graph_store=graph_store, vector_store=vector_store)
 
 # LLM Client and Graph StateMachine compilation
 llm_client = LLMClient()
+memory.llm_client = llm_client
 graph_flow = create_nexus_graph(memory=memory, llm_client=llm_client)
 
 # Instantiate background worker loops
@@ -73,11 +74,39 @@ try:
 except Exception:
     pass
 
+from langchain_core.messages import HumanMessage, AIMessage
+
+# Path to session persistence
+sessions_path = os.path.join(storage_dir, "sessions.json")
+
+def load_sessions() -> Dict[str, Any]:
+    if os.path.exists(sessions_path):
+        try:
+            with open(sessions_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"sessions": []}
+
+def save_sessions(data: Dict[str, Any]):
+    try:
+        with open(sessions_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"Error saving sessions: {e}")
+
 # --- Pydantic Data Schemas ---
 
 class QueryRequest(BaseModel):
     message: str
     user_id: Optional[str] = "web_user"
+    session_id: Optional[str] = None
+
+class CreateSessionRequest(BaseModel):
+    title: Optional[str] = "Nouvelle conversation"
+
+class RenameSessionRequest(BaseModel):
+    title: str
 
 class FactRequest(BaseModel):
     node_id: str
@@ -313,8 +342,27 @@ def run_query(request: QueryRequest):
     if not request.message.strip():
         raise HTTPException(status_code=400, detail="Query message cannot be empty.")
     
+    session_id = request.session_id or "web_chat_session"
+    config = {"configurable": {"thread_id": f"session_{session_id}"}}
+    
     try:
-        config = {"configurable": {"thread_id": "web_chat_session"}}
+        # Load sessions database
+        sessions_db = load_sessions()
+        session_data = next((s for s in sessions_db["sessions"] if s["id"] == session_id), None)
+        
+        # If the session is stored in JSON but LangGraph checkpointer is empty (e.g. after server restart),
+        # rebuild the LangGraph state.
+        lg_state = graph_flow.get_state(config)
+        if session_data and (not lg_state.values or "messages" not in lg_state.values):
+            lg_messages = []
+            for msg in session_data.get("messages", []):
+                if msg["role"] == "assistant":
+                    lg_messages.append(AIMessage(content=msg["content"]))
+                else:
+                    lg_messages.append(HumanMessage(content=msg["content"]))
+            if lg_messages:
+                graph_flow.update_state(config, {"messages": lg_messages})
+
         initial_state = {
             "messages": [{"role": "user", "content": request.message}],
             "current_query": request.message,
@@ -326,12 +374,215 @@ def run_query(request: QueryRequest):
         }
         
         final_state = graph_flow.invoke(initial_state, config=config)
+        response_text = final_state.get("response", "No response generated.")
+        
+        # Update or create the session in JSON database
+        messages_to_save = []
+        updated_lg_messages = final_state.get("messages", [])
+        for m in updated_lg_messages:
+            role = "user"
+            if hasattr(m, "type"):
+                role = "assistant" if m.type == "ai" else "user"
+            elif isinstance(m, dict):
+                role = m.get("role", "user")
+            
+            content = m.content if hasattr(m, "content") else str(m)
+            if isinstance(content, dict):
+                content = content.get("content", "")
+            
+            if content.strip():
+                messages_to_save.append({"role": role, "content": content})
+
+        if not session_data:
+            session_data = {
+                "id": session_id,
+                "title": request.message[:40] + ("..." if len(request.message) > 40 else ""),
+                "created_at": datetime.utcnow().isoformat(),
+                "messages": messages_to_save
+            }
+            sessions_db["sessions"].insert(0, session_data)
+        else:
+            session_data["messages"] = messages_to_save
+            
+        save_sessions(sessions_db)
+
         return {
-            "response": final_state.get("response", "No response generated."),
+            "response": response_text,
             "audit_trail": final_state.get("audit_trail", [])
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Graph execution failed: {str(e)}")
+
+
+@app.get("/api/sessions")
+def get_sessions():
+    """
+    Returns the list of all chat sessions without full message lists to save bandwidth.
+    """
+    sessions_db = load_sessions()
+    summary = []
+    for s in sessions_db.get("sessions", []):
+        summary.append({
+            "id": s["id"],
+            "title": s["title"],
+            "created_at": s.get("created_at", datetime.utcnow().isoformat())
+        })
+    return {"sessions": summary}
+
+
+@app.post("/api/sessions")
+def create_session(request: CreateSessionRequest):
+    """
+    Creates a new chat session.
+    """
+    import uuid
+    session_id = str(uuid.uuid4())
+    sessions_db = load_sessions()
+    
+    new_sess = {
+        "id": session_id,
+        "title": request.title or "Nouvelle conversation",
+        "created_at": datetime.utcnow().isoformat(),
+        "messages": []
+    }
+    
+    sessions_db["sessions"].insert(0, new_sess)
+    save_sessions(sessions_db)
+    return new_sess
+
+
+@app.get("/api/sessions/{session_id}")
+def get_session(session_id: str):
+    """
+    Returns a single session with its messages.
+    """
+    sessions_db = load_sessions()
+    session_data = next((s for s in sessions_db["sessions"] if s["id"] == session_id), None)
+    if not session_data:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return session_data
+
+
+@app.put("/api/sessions/{session_id}")
+def rename_session(session_id: str, request: RenameSessionRequest):
+    """
+    Renames an existing session.
+    """
+    sessions_db = load_sessions()
+    session_data = next((s for s in sessions_db["sessions"] if s["id"] == session_id), None)
+    if not session_data:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    session_data["title"] = request.title
+    save_sessions(sessions_db)
+    return {"success": True, "session": session_data}
+
+
+@app.delete("/api/sessions/{session_id}")
+def delete_session(session_id: str):
+    """
+    Deletes a session from the list.
+    """
+    sessions_db = load_sessions()
+    sessions_db["sessions"] = [s for s in sessions_db["sessions"] if s["id"] != session_id]
+    save_sessions(sessions_db)
+    return {"success": True}
+
+
+@app.post("/api/sessions/{session_id}/commit")
+def commit_session_to_memory(session_id: str):
+    """
+    Consolidates and extracts learnings/facts from a conversation and commits them to the MPE.
+    """
+    sessions_db = load_sessions()
+    session_data = next((s for s in sessions_db["sessions"] if s["id"] == session_id), None)
+    if not session_data:
+        raise HTTPException(status_code=404, detail="Session not found")
+        
+    messages = session_data.get("messages", [])
+    if not messages:
+        raise HTTPException(status_code=400, detail="Cannot commit an empty session")
+        
+    # Format dialogue
+    dialogue_parts = []
+    for m in messages:
+        role = "User" if m["role"] == "user" else "Assistant"
+        dialogue_parts.append(f"{role}: {m['content']}")
+    dialogue_text = "\n".join(dialogue_parts)
+    
+    prompt = [
+        {
+            "role": "system",
+            "content": (
+                "You are the Knowledge Consolidation engine for Nexus.\n"
+                "Analyze the following conversation history and extract any concrete facts, conceptual definitions, lessons, or rules that should be persisted to long-term memory.\n"
+                "Only extract key facts or learnings. Ignore general dialogue, greeting messages, or irrelevant meta-questions.\n"
+                "For each extracted fact, define a node_id (slug), node_type (e.g. Concept, Fact, Skill, Lesson), and the text statement.\n"
+                "Also extract relationships if relevant.\n\n"
+                "Respond ONLY with a JSON object:\n"
+                "{\n"
+                '  "facts": [\n'
+                '     {"node_id": "slug", "node_type": "type", "text": "description", "properties": {}}\n'
+                '  ],\n'
+                '  "relations": [\n'
+                '     {"source": "src_id", "target": "tgt_id", "type": "REL_TYPE"}\n'
+                '  ]\n'
+                "}"
+            )
+        },
+        {"role": "user", "content": dialogue_text}
+    ]
+    
+    try:
+        raw_json = llm_client.generate(prompt, max_tokens=2500, response_format={"type": "json_object"})
+        data = json.loads(raw_json)
+        
+        facts = data.get("facts", [])
+        relations = data.get("relations", [])
+        
+        committed_facts = []
+        committed_relations = []
+        
+        # Ingest facts
+        for f in facts:
+            node_id = f.get("node_id")
+            node_type = f.get("node_type", "Fact")
+            text = f.get("text", "")
+            props = f.get("properties", {})
+            if node_id and text:
+                res = memory.add_fact(
+                    node_id=node_id,
+                    node_type=node_type,
+                    text=text,
+                    properties={**props, "committed_from_session": session_id},
+                    timestamp=datetime.utcnow(),
+                    source=f"session_commit:{session_id}"
+                )
+                committed_facts.append(f"{node_id} ({node_type})")
+                
+        # Ingest relations
+        for r in relations:
+            src = r.get("source")
+            tgt = r.get("target")
+            rtype = r.get("type", "CONNECTED_TO")
+            if src and tgt:
+                memory.add_relationship(
+                    source_id=src,
+                    target_id=tgt,
+                    rel_type=rtype,
+                    properties={"committed_from_session": session_id},
+                    timestamp=datetime.utcnow()
+                )
+                committed_relations.append(f"{src} --({rtype})--> {tgt}")
+                
+        return {
+            "success": True,
+            "facts_committed": committed_facts,
+            "relations_committed": committed_relations,
+            "message": f"Successfully committed {len(committed_facts)} facts and {len(committed_relations)} relations to MPE."
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to consolidate and commit conversation: {str(e)}")
 
 @app.post("/api/facts")
 def add_fact(request: FactRequest):

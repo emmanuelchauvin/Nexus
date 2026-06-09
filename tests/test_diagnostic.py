@@ -15,8 +15,13 @@ def test_diagnostic_loop_and_autocorrection(memory, llm_client):
     llm_client.mock_responses = [
         "QUERY",
         '{"sufficiency_score": 0.2, "reasoning": "Budget details are not in context.", "missing_knowledge": ["budget of project X"]}',
+        "What is the budget of project X?",
+        '{"sufficiency_score": 0.2, "reasoning": "Budget details are not in context.", "missing_knowledge": ["budget of project X"]}',
+        "What is the budget of project X?",
+        '{"sufficiency_score": 0.2, "reasoning": "Budget details are not in context.", "missing_knowledge": ["budget of project X"]}',
         "I don't know the budget of project X."
     ]
+
     
     graph = create_nexus_graph(memory, llm_client)
     

@@ -72,3 +72,26 @@ class ChromaDBStore(VectorStore):
         Delete a document by its ID.
         """
         self.collection.delete(ids=[document_id])
+
+    def get_all(self) -> List[VectorDocument]:
+        """
+        Retrieve all documents currently stored in the Chroma collection.
+        """
+        results = self.collection.get(include=["documents", "metadatas", "embeddings"])
+        documents = []
+        if results and results.get("ids"):
+            ids = results["ids"]
+            texts = results.get("documents") or [""] * len(ids)
+            metadatas = results.get("metadatas") or [{}] * len(ids)
+            embeddings = results.get("embeddings")
+            embeddings_list = embeddings if embeddings else [None] * len(ids)
+            
+            for i in range(len(ids)):
+                documents.append(VectorDocument(
+                     id=ids[i],
+                     text=texts[i],
+                     metadata=metadatas[i] or {},
+                     embedding=embeddings_list[i]
+                ))
+        return documents
+

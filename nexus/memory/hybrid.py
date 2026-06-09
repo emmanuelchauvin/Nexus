@@ -50,14 +50,19 @@ class HybridMemory:
                 self.graph_store.add_node(updated_node)
 
                 # Upsert to Vector Store
+                metadata = {
+                    "type": node_type,
+                    "timestamp": timestamp.isoformat(),
+                    "source": source or "unknown"
+                }
+                for field in ("source_doc", "section_hierarchy", "effective_date", "expiration_date", "confidence_score", "last_accessed"):
+                    if properties and field in properties:
+                        metadata[field] = properties[field]
+
                 doc = VectorDocument(
                     id=node_id,
                     text=text,
-                    metadata={
-                        "type": node_type,
-                        "timestamp": timestamp.isoformat(),
-                        "source": source or "unknown"
-                    }
+                    metadata=metadata
                 )
                 self.vector_store.upsert(doc)
 
@@ -85,14 +90,19 @@ class HybridMemory:
             self.graph_store.add_node(new_node)
 
             # Insert into Vector Store
+            metadata = {
+                "type": node_type,
+                "timestamp": timestamp.isoformat(),
+                "source": source or "unknown"
+            }
+            for field in ("source_doc", "section_hierarchy", "effective_date", "expiration_date", "confidence_score", "last_accessed"):
+                if properties and field in properties:
+                    metadata[field] = properties[field]
+
             doc = VectorDocument(
                 id=node_id,
                 text=text,
-                metadata={
-                    "type": node_type,
-                    "timestamp": timestamp.isoformat(),
-                    "source": source or "unknown"
-                }
+                metadata=metadata
             )
             self.vector_store.upsert(doc)
 
@@ -127,18 +137,122 @@ class HybridMemory:
     def retrieve(self, query: str, limit: int = 5) -> Dict[str, Any]:
         """
         Retrieve context hybridly:
-        1. Find similar documents in Vector Store.
-        2. Expand them to a local subgraph in Graph Store (direct relations).
-        3. Formulate a clean textual context, listing of retrieved items, and an audit trail.
+        1. Find similar documents using Hybrid Search (ChromaDB + BM25) and RRF fusion.
+        2. Rerank candidates using LLM client.
+        3. Expand them to a local subgraph in Graph Store (direct relations).
+        4. Formulate a clean textual context, listing of retrieved items, and an audit trail.
         """
-        # Vector search
-        matched_docs = self.vector_store.search(query, limit=limit)
+        # Step 1: Hybrid Search (Dense + BM25)
+        # Fetch dense candidates
+        dense_results = self.vector_store.search(query, limit=limit * 2)
+        dense_ranking = [doc.id for doc in dense_results]
+
+        # Fetch all docs to run BM25
+        sparse_ranking = []
+        try:
+            all_docs = self.vector_store.get_all()
+        except Exception:
+            all_docs = []
+            
+        doc_map = {doc.id: doc for doc in all_docs}
+        
+        # Backpopulate doc_map with dense results if get_all didn't return them for some reason
+        for doc in dense_results:
+            if doc.id not in doc_map:
+                doc_map[doc.id] = doc
+
+        if all_docs:
+            try:
+                from rank_bm25 import BM25Okapi
+                def clean_tokenize(t: str) -> List[str]:
+                    lowered = t.lower()
+                    for p in ".,!?()\"';:-":
+                        lowered = lowered.replace(p, " ")
+                    return [w for w in lowered.split() if w]
+                    
+                tokenized_corpus = [clean_tokenize(doc.text) for doc in all_docs]
+                bm25 = BM25Okapi(tokenized_corpus)
+                tokenized_query = clean_tokenize(query)
+                scores = bm25.get_scores(tokenized_query)
+                
+                scored_docs = []
+                for doc, score in zip(all_docs, scores):
+                    if score > 0:
+                        scored_docs.append((score, doc.id))
+                scored_docs.sort(key=lambda x: -x[0])
+                sparse_ranking = [doc_id for _, doc_id in scored_docs]
+            except Exception as e:
+                # Fallback if BM25 setup fails
+                sparse_ranking = []
+
+        # Reciprocal Rank Fusion (RRF)
+        rrf_scores = {}
+        for rank, doc_id in enumerate(dense_ranking):
+            rrf_scores[doc_id] = rrf_scores.get(doc_id, 0.0) + 1.0 / (60.0 + (rank + 1))
+        for rank, doc_id in enumerate(sparse_ranking):
+            rrf_scores[doc_id] = rrf_scores.get(doc_id, 0.0) + 1.0 / (60.0 + (rank + 1))
+
+        # Sort candidate doc IDs by RRF score descending
+        sorted_doc_ids = sorted(rrf_scores.keys(), key=lambda x: -rrf_scores[x])
+        candidate_docs = [doc_map[doc_id] for doc_id in sorted_doc_ids if doc_id in doc_map]
+
+        # Step 2: LLM Reranking (if llm_client is available)
+        reranked_docs = candidate_docs
+        used_llm_rerank = False
+        if hasattr(self, "llm_client") and self.llm_client and len(candidate_docs) > 1:
+            candidates_str = ""
+            for idx, doc in enumerate(candidate_docs[:limit * 2]):
+                candidates_str += f"[{idx}] (ID: {doc.id})\nContent: {doc.text}\n---\n"
+            
+            prompt = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an advanced retrieval reranker.\n"
+                        "Given a user query and a list of candidate documents, select and rank the most relevant documents "
+                        "that directly help answer the query. Return ONLY a JSON object containing the ranked indices in order of relevance.\n"
+                        "Ensure the most relevant documents are at the front of the list.\n\n"
+                        "JSON format schema:\n"
+                        "{\n"
+                        '  "ranked_indices": [integer, integer, ...]\n'
+                        "}"
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": f"User Query: {query}\n\nCandidate Documents:\n{candidates_str}"
+                }
+            ]
+            try:
+                raw_resp = self.llm_client.generate(prompt, max_tokens=1000, response_format={"type": "json_object"})
+                import json
+                data = json.loads(raw_resp)
+                ranked_indices = data.get("ranked_indices", [])
+                
+                ordered_docs = []
+                seen_indices = set()
+                for idx in ranked_indices:
+                    if isinstance(idx, int) and 0 <= idx < len(candidate_docs) and idx not in seen_indices:
+                        ordered_docs.append(candidate_docs[idx])
+                        seen_indices.add(idx)
+                
+                # Append any remaining candidates that were not ranked by LLM
+                for idx, doc in enumerate(candidate_docs):
+                    if idx not in seen_indices:
+                        ordered_docs.append(doc)
+                        
+                reranked_docs = ordered_docs
+                used_llm_rerank = True
+            except Exception:
+                pass
+
+        matched_docs = reranked_docs[:limit]
         
         retrieved_nodes: Dict[str, EntityNode] = {}
         retrieved_edges: List[RelationEdge] = []
         audit_trail: List[str] = []
 
-        # Step 1: Fetch nodes from vector results
+        # Step 3: Fetch nodes from matched results
         for doc in matched_docs:
             node = self.graph_store.get_node(doc.id)
             if node:
@@ -148,10 +262,12 @@ class HybridMemory:
                 self.graph_store.add_node(node)
                 
                 retrieved_nodes[node.id] = node
+                rerank_prefix = "LLM Reranked " if used_llm_rerank else ""
                 audit_trail.append(
-                    f"[Provenance] Semantic match: Node '{node.id}' retrieved via vector search. "
+                    f"[Provenance] Semantic match: Node '{node.id}' retrieved via {rerank_prefix}Hybrid Search. "
                     f"Ingested: {node.timestamp.isoformat()} from source '{node.properties.get('source', 'unknown')}'."
                 )
+
 
         # Step 2: Fetch adjacent edges and endpoints to complete the local subgraph context
         seed_ids = list(retrieved_nodes.keys())

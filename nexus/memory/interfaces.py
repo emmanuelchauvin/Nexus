@@ -73,3 +73,9 @@ class VectorStore(ABC):
     def delete(self, document_id: str) -> None:
         """Delete a document by its unique ID."""
         pass
+
+    @abstractmethod
+    def get_all(self) -> List[VectorDocument]:
+        """Retrieve all documents currently stored in the vector database."""
+        pass
+

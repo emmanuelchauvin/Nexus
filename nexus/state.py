@@ -29,3 +29,10 @@ class AgentState(TypedDict):
     
     # Staged memory updates pending conversational validation
     pending_memory_updates: List[Dict[str, Any]]
+
+    # Adaptive loop counter for self-RAG query expansion
+    loop_count: int
+
+    # The user's original query (saved before any reformulations)
+    original_query: str
+

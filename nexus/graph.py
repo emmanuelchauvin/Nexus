@@ -22,12 +22,17 @@ class NexusWorkflow:
         Classifies whether the user request is an ingestion (STORE) or an interaction (QUERY).
         """
         pending = state.get("pending_memory_updates", [])
+        
+        init_updates = {}
+        if "loop_count" not in state or state.get("loop_count") is None:
+            init_updates["loop_count"] = 0
+
         if pending:
-            return {"response": "CONFIRM"}
+            return {"response": "CONFIRM", **init_updates}
 
         messages = state.get("messages", [])
         if not messages:
-            return {"response": "QUERY", "current_query": ""}
+            return {"response": "QUERY", "current_query": "", "original_query": "", **init_updates}
         
         last_msg = messages[-1]
         text = last_msg.content if hasattr(last_msg, "content") else str(last_msg)
@@ -38,10 +43,10 @@ class NexusWorkflow:
         text_upper = text.strip().upper()
         if text_upper.startswith("STORE:") or text_upper.startswith("INGEST:"):
             query_clean = text.split(":", 1)[1].strip()
-            return {"response": "STORE", "current_query": query_clean}
+            return {"response": "STORE", "current_query": query_clean, "original_query": query_clean, **init_updates}
         if text_upper.startswith("QUERY:") or text_upper.startswith("ASK:"):
             query_clean = text.split(":", 1)[1].strip()
-            return {"response": "QUERY", "current_query": query_clean}
+            return {"response": "QUERY", "current_query": query_clean, "original_query": query_clean, **init_updates}
 
         # Asynchronously classify using the LLM
         prompt = [
@@ -68,7 +73,9 @@ class NexusWorkflow:
 
         return {
             "response": classification,
-            "current_query": text
+            "current_query": text,
+            "original_query": text,
+            **init_updates
         }
 
     def search_memory_node(self, state: AgentState) -> Dict[str, Any]:
@@ -78,10 +85,29 @@ class NexusWorkflow:
         query = state.get("current_query", "")
         retrieved = self.memory.retrieve(query)
         
+        existing_context = state.get("retrieved_context", "")
+        new_context = retrieved["context_text"]
+        
+        if existing_context:
+            existing_lines = existing_context.split("\n")
+            new_lines = new_context.split("\n")
+            
+            merged_lines = []
+            seen_lines = set()
+            for line in existing_lines + new_lines:
+                clean = line.strip()
+                if clean and clean not in seen_lines:
+                    merged_lines.append(line)
+                    seen_lines.add(clean)
+            combined_context = "\n".join(merged_lines)
+        else:
+            combined_context = new_context
+            
         return {
-            "retrieved_context": retrieved["context_text"],
+            "retrieved_context": combined_context,
             "audit_trail": state.get("audit_trail", []) + retrieved["audit_trail"]
         }
+
 
     def diagnostic_node(self, state: AgentState) -> Dict[str, Any]:
         """
@@ -123,12 +149,69 @@ class NexusWorkflow:
             "audit_trail": state.get("audit_trail", []) + [audit_msg]
         }
 
+    def reformulate_query_node(self, state: AgentState) -> Dict[str, Any]:
+        """
+        Reformulates the query using the LLM based on the missing knowledge gaps.
+        """
+        original_query = state.get("original_query") or state.get("current_query") or ""
+        gaps = state.get("missing_knowledge_log", [])
+        
+        prompt = [
+            {
+                "role": "system",
+                "content": (
+                    "You are the Query Reformulator for the Nexus Memory System.\n"
+                    "Your job is to rewrite the original user query to retrieve missing details from the memory database.\n"
+                    "Consider the original query and the list of identified knowledge gaps.\n"
+                    "Generate a single query string that combines keyword search, acronym expansion, and relevant contextual terms.\n"
+                    "Respond ONLY with the reformulated query text, nothing else."
+                )
+            },
+            {
+                "role": "user",
+                "content": f"Original Query: {original_query}\nKnowledge Gaps / Missing: {', '.join(gaps)}"
+            }
+        ]
+        
+        try:
+            reformulated = self.llm_client.generate(prompt, max_tokens=1000).strip()
+        except Exception:
+            reformulated = original_query  # Fallback
+            
+        loop_count = state.get("loop_count", 0) + 1
+        audit_msg = f"[Adaptive RAG] Loop {loop_count}: Reformulated query to '{reformulated}' based on gaps: {gaps}"
+        
+        return {
+            "current_query": reformulated,
+            "loop_count": loop_count,
+            "audit_trail": state.get("audit_trail", []) + [audit_msg]
+        }
+
+
     def inference_node(self, state: AgentState) -> Dict[str, Any]:
         """
         Generates the final user-facing response using the retrieved context.
         """
         query = state.get("current_query", "")
         context = state.get("retrieved_context", "")
+
+        # Format previous messages to include conversation history
+        formatted_history = []
+        messages = state.get("messages", [])
+        for msg in messages[:-1]:
+            role = "user"
+            if hasattr(msg, "type"):
+                role = "assistant" if msg.type == "ai" else "user"
+            elif isinstance(msg, dict):
+                role = msg.get("role", "user")
+            
+            content = msg.content if hasattr(msg, "content") else str(msg)
+            if isinstance(content, dict):
+                content = content.get("content", "")
+            
+            # Skip empty or system alerts from previous assistant messages
+            if content.strip():
+                formatted_history.append({"role": role, "content": content})
 
         prompt = [
             {
@@ -144,6 +227,7 @@ class NexusWorkflow:
                     "4. Do not make up facts."
                 )
             },
+            *formatted_history,
             {
                 "role": "user",
                 "content": f"Retrieved Context:\n{context}\n\nUser Query: {query}"
@@ -494,8 +578,15 @@ def route_diagnostic(state: AgentState) -> str:
     Routes to carence warning node if sufficiency score is low.
     """
     score = state.get("sufficiency_score", 1.0)
+    loop_count = state.get("loop_count", 0)
+    
     if score >= 0.7:
         return "inference"
+    
+    # Adaptive loop: if score is low, try to reformulate and search again (up to 2 times)
+    if loop_count < 2:
+        return "reformulate_query"
+        
     return "carence"
 
 def create_nexus_graph(memory: HybridMemory, llm_client: LLMClient) -> StateGraph:
@@ -511,6 +602,7 @@ def create_nexus_graph(memory: HybridMemory, llm_client: LLMClient) -> StateGrap
     graph_builder.add_node("search_memory", workflow.search_memory_node)
     graph_builder.add_node("diagnostic", workflow.diagnostic_node)
     graph_builder.add_node("carence", workflow.carence_node)
+    graph_builder.add_node("reformulate_query", workflow.reformulate_query_node)
     graph_builder.add_node("inference", workflow.inference_node)
     graph_builder.add_node("analyze_interaction", workflow.analyze_interaction_node)
     graph_builder.add_node("update_memory", workflow.update_memory_node)
@@ -519,6 +611,7 @@ def create_nexus_graph(memory: HybridMemory, llm_client: LLMClient) -> StateGrap
     graph_builder.add_edge(START, "router")
     graph_builder.add_edge("search_memory", "diagnostic")
     graph_builder.add_edge("carence", "inference")
+    graph_builder.add_edge("reformulate_query", "search_memory")
     graph_builder.add_edge("inference", "analyze_interaction")
     graph_builder.add_edge("analyze_interaction", END)
     graph_builder.add_edge("update_memory", END)
@@ -548,8 +641,10 @@ def create_nexus_graph(memory: HybridMemory, llm_client: LLMClient) -> StateGrap
         route_diagnostic,
         {
             "inference": "inference",
+            "reformulate_query": "reformulate_query",
             "carence": "carence"
         }
     )
     
     return graph_builder.compile(checkpointer=MemorySaver())
+

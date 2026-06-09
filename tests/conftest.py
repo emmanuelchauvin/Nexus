@@ -46,6 +46,9 @@ class InMemoryVectorStore(VectorStore):
         if document_id in self.documents:
             del self.documents[document_id]
 
+    def get_all(self) -> List[VectorDocument]:
+        return list(self.documents.values())
+
 @pytest.fixture
 def graph_store():
     """Returns an ephemeral, in-memory NetworkX GraphStore."""
@@ -57,9 +60,12 @@ def vector_store():
     return InMemoryVectorStore()
 
 @pytest.fixture
-def memory(graph_store, vector_store):
+def memory(graph_store, vector_store, llm_client):
     """Returns a HybridMemory coordinator using in-memory stores."""
-    return HybridMemory(graph_store=graph_store, vector_store=vector_store)
+    mem = HybridMemory(graph_store=graph_store, vector_store=vector_store)
+    mem.llm_client = llm_client
+    return mem
+
 
 @pytest.fixture
 def llm_client():

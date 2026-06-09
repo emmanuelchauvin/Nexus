@@ -10,3 +10,4 @@ fastapi
 uvicorn
 pypdf
 python-multipart
+rank_bm25

@@ -66,6 +66,8 @@ class LLMClient:
             import re
             # Remove thinking blocks (<think>...</think>)
             cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+            if "<think>" in cleaned:
+                cleaned = cleaned.split("<think>", 1)[0]
             # If JSON is expected, extract from markdown codeblocks
             is_json = response_format and response_format.get("type") in ("json_object", "json_schema")
             if is_json:

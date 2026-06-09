@@ -199,7 +199,7 @@ class NexusWorkflow:
         """
         Generates the final user-facing response using the retrieved context.
         """
-        query = state.get("current_query", "")
+        query = state.get("original_query") or state.get("current_query", "")
         context = state.get("retrieved_context", "")
 
         # Format previous messages to include conversation history
@@ -249,7 +249,7 @@ class NexusWorkflow:
             }
         ]
 
-        response = self.llm_client.generate(prompt, max_tokens=1000)
+        response = self.llm_client.generate(prompt, max_tokens=4000)
         audit_msg = "[Inference] Generated final answer using retrieved context."
 
         return {
@@ -356,7 +356,7 @@ class NexusWorkflow:
         Analyzes the conversational exchange to extract new facts or modifications.
         Automatically updates memory for simple facts, or stages them for confirmation.
         """
-        query = state.get("current_query", "")
+        query = state.get("original_query") or state.get("current_query", "")
         response = state.get("response", "")
         working_mem = dict(state.get("working_memory") or {
             "user_profile": "Unknown user",

@@ -27,6 +27,18 @@ from nexus.loops.oubli import OubliLoop
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 load_dotenv(os.path.join(project_root, ".env"), override=True)
 
+def clean_and_parse_json(raw_text: str) -> dict:
+    """
+    Cleans markdown backticks and parses the JSON output of the LLM.
+    """
+    cleaned = raw_text.strip()
+    if cleaned.startswith("```"):
+        lines = cleaned.split("\n")
+        if lines[0].startswith("```json") or lines[0].startswith("```"):
+            lines = lines[1:-1]
+        cleaned = "\n".join(lines).strip()
+    return json.loads(cleaned)
+
 app = FastAPI(
     title="Nexus API",
     description="Backend services for the Evolutive Persistent Memory (MPE) system",
@@ -176,7 +188,7 @@ def llm_chunk_summarize(chunk_content: str, llm_client: LLMClient) -> dict:
     ]
     try:
         raw_resp = llm_client.generate(prompt, max_tokens=4000, response_format={"type": "json_object"})
-        data = json.loads(raw_resp)
+        data = clean_and_parse_json(raw_resp)
         if "summary_markdown" not in data:
             data["summary_markdown"] = chunk_content
         if "entities" not in data:
@@ -540,7 +552,7 @@ def commit_session_to_memory(session_id: str):
     
     try:
         raw_json = llm_client.generate(prompt, max_tokens=2500, response_format={"type": "json_object"})
-        data = json.loads(raw_json)
+        data = clean_and_parse_json(raw_json)
         
         facts = data.get("facts", [])
         relations = data.get("relations", [])

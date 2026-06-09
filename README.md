@@ -7,14 +7,15 @@ Nexus est un agent cognitif autonome doté d'une **Mémoire Persistante Évoluti
 ## 🚀 Fonctionnalités Clés
 
 1. **Plasticité Cognitive (*Non-Gradient Adaptation*)** : Intégration de connaissances en continu et invalidation des faits obsolètes sans réentraînement de l'architecture LLM.
-2. **Mémoire Hybride Temporelle-Sémantique** : Combinaison d'une base vectorielle (`ChromaDB`) pour la similarité sémantique et d'un graphe relationnel (`NetworkX`) pour modéliser le contexte connexe et les entités.
+2. **Mémoire à Trois Niveaux & Hybride (Style MemGPT)** : Combinaison d'une mémoire de travail active (*Working Memory* modifiée en direct par l'agent pour le profil utilisateur, les objectifs et notes), d'une base vectorielle (`ChromaDB`) pour la similarité sémantique, et d'un graphe relationnel (`NetworkX`).
 3. **Arbitrage Temporel Intègre** : Si deux faits se contredisent, Nexus applique une résolution chronologique : l'information la plus récente ($T_2 > T_1$) l'emporte, et le changement est tracé dans le journal d'audit.
 4. **Les 3 Boucles Cognitives** :
    - **Boucle de Diagnostic** : Évalue la suffisance du contexte pour répondre à une question. En cas de carence, le flux bifurque vers un nœud d'alerte.
    - **Boucle de Distillation** : Consolide, fusionne les entités redondantes et crée de nouveaux liens logiques.
    - **Boucle d'Oubli** : Élimine les connaissances obsolètes ou les moins consultées (politiques LRU et expiration temporelle) pour éviter la saturation.
 5. **Terminal Nexus Multi-mode** : Interface interactive offrant un mode discussion classique avec chaîne de preuves, un mode diagnostic visuel du graphe et un mode gouvernance (*Human-in-the-loop*).
-6. **Ingestion Documentaire (PDF)** : Extraction automatique de texte à partir de documents PDF, découpage en fragments sémantiques séquentiels liés (`PART_OF`, `NEXT`) et indexation directe dans la mémoire hybride (vectorielle + graphe).
+6. **Ingestion Documentaire (PDF)** : Extraction automatique de texte à partir de documents PDF, découpage en fragments sémantiques séquentiels liés (`PART_OF`, `NEXT`) et indexation directe dans la mémoire hybride.
+7. **Recherche Globale GraphRAG** : Détection de communautés sémantiques disjointes via l'algorithme de Louvain, génération de résumés thématiques via LLM et stockage vectoriel pour répondre de manière holistique au corpus.
 
 ---
 
@@ -63,6 +64,7 @@ c:\Devs\Memoire-evolutive\
     ├── test_temporal_conflict.py # Tests de résolution de conflits chronologiques
     ├── test_audit.py             # Tests de génération de chaîne de provenance
     ├── test_diagnostic.py        # Tests de détection de carence de mémoire
+    ├── test_graphrag_and_working_memory.py # Tests de validation GraphRAG et mémoire de travail
     └── test_resilience.py        # Tests de saturation de mémoire et oubli LRU
 ```
 

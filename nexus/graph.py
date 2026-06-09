@@ -26,6 +26,13 @@ class NexusWorkflow:
         init_updates = {}
         if "loop_count" not in state or state.get("loop_count") is None:
             init_updates["loop_count"] = 0
+            
+        if "working_memory" not in state or state.get("working_memory") is None:
+            init_updates["working_memory"] = {
+                "user_profile": "Unknown user",
+                "current_tasks": [],
+                "scratchpad": "No active notes."
+            }
 
         if pending:
             return {"response": "CONFIRM", **init_updates}
@@ -213,11 +220,19 @@ class NexusWorkflow:
             if content.strip():
                 formatted_history.append({"role": role, "content": content})
 
+        working_mem = state.get("working_memory") or {
+            "user_profile": "Unknown user",
+            "current_tasks": [],
+            "scratchpad": "No active notes."
+        }
+        working_mem_str = json.dumps(working_mem, ensure_ascii=False, indent=2)
+
         prompt = [
             {
                 "role": "system",
                 "content": (
                     "You are Nexus, an Evolutive Persistent Memory agent.\n"
+                    f"Active Working Memory:\n{working_mem_str}\n\n"
                     "Use the retrieved context to answer the user's query.\n"
                     "Rules:\n"
                     "1. Rely strictly on the facts, sources, and timestamps in the context.\n"
@@ -343,6 +358,11 @@ class NexusWorkflow:
         """
         query = state.get("current_query", "")
         response = state.get("response", "")
+        working_mem = dict(state.get("working_memory") or {
+            "user_profile": "Unknown user",
+            "current_tasks": [],
+            "scratchpad": "No active notes."
+        })
 
         # Ask LLM to extract any statement that user declared as fact
         prompt = [
@@ -353,7 +373,11 @@ class NexusWorkflow:
                     "Analyze the user's statement and determine if the user has shared a new fact, correction, or update "
                     "that should be saved to the database.\n"
                     "Only extract facts that the user is asserting as true. Do not extract questions or assistant replies.\n\n"
-                    "Classification rules:\n"
+                    "Also, analyze the exchange to update the agent's Working Memory if appropriate. The working memory stores:\n"
+                    "- user_profile: key information about the user (e.g. name, role, preferences)\n"
+                    "- current_tasks: list of active goals or tasks discussed (add new ones, remove/mark completed ones)\n"
+                    "- scratchpad: brief self-notes or context for the agent to remember for future turns\n\n"
+                    "Classification rules for database updates:\n"
                     "1. SIMPLE: A new factual detail that does not contradict existing knowledge and does not alter core relations.\n"
                     "2. STRUCTURAL: An update/correction to an existing key fact (e.g. changing someone's role, name, status, or merging entities, or deleting node).\n"
                     "3. NONE: No new factual information was asserted.\n\n"
@@ -369,36 +393,58 @@ class NexusWorkflow:
                     '       "node_type": "type",\n'
                     '       "text": "clean fact statement",\n'
                     '       "properties": {}\n'
-                    '     },\n'
-                    '     {\n'
-                    '       "action": "add_relationship",\n'
-                    '       "source_id": "src",\n'
-                    '       "target_id": "tgt",\n'
-                    '       "rel_type": "TYPE"\n'
                     '     }\n'
-                    '  ]\n'
+                    '  ],\n'
+                    '  "working_memory_update": {\n'
+                    '     "user_profile": "Updated profile string or null if no change",\n'
+                    '     "current_tasks": ["list of updated task strings or null if no change"],\n'
+                    '     "scratchpad": "Updated scratchpad string or null if no change"\n'
+                    '  }\n'
                     "}"
                 )
             },
-            {"role": "user", "content": f"User: {query}\nAssistant: {response}"}
+            {"role": "user", "content": f"User: {query}\nAssistant: {response}\n\nCurrent Working Memory:\n{json.dumps(working_mem, ensure_ascii=False)}"}
         ]
 
         try:
             raw_json = self.llm_client.generate(prompt, max_tokens=3000, response_format={"type": "json_object"})
             data = json.loads(raw_json)
         except Exception:
-            data = {"has_fact": False, "classification": "NONE", "updates": []}
+            data = {"has_fact": False, "classification": "NONE", "updates": [], "working_memory_update": {}}
+
+        # Apply working memory updates
+        wm_update = data.get("working_memory_update", {})
+        wm_changed = False
+        audit_trail = []
+        if wm_update:
+            if wm_update.get("user_profile") is not None:
+                working_mem["user_profile"] = wm_update["user_profile"]
+                wm_changed = True
+                audit_trail.append(f"[Working Memory] Updated user profile: {working_mem['user_profile']}")
+            if wm_update.get("current_tasks") is not None:
+                working_mem["current_tasks"] = wm_update["current_tasks"]
+                wm_changed = True
+                audit_trail.append(f"[Working Memory] Updated tasks list: {working_mem['current_tasks']}")
+            if wm_update.get("scratchpad") is not None:
+                working_mem["scratchpad"] = wm_update["scratchpad"]
+                wm_changed = True
+                audit_trail.append(f"[Working Memory] Updated scratchpad: {working_mem['scratchpad']}")
+
+        state_updates = {}
+        if wm_changed:
+            state_updates["working_memory"] = working_mem
+            state_updates["audit_trail"] = state.get("audit_trail", []) + audit_trail
 
         if not data.get("has_fact", False) or not data.get("updates"):
             return {
-                "messages": [{"role": "assistant", "content": response}]
+                "messages": [{"role": "assistant", "content": response}],
+                **state_updates
             }
 
         classification = data.get("classification", "NONE")
         updates = data.get("updates", [])
         desc = data.get("description", "Mise à jour")
 
-        audit_trail = []
         pending_updates = []
 
         if classification == "SIMPLE":
@@ -431,7 +477,8 @@ class NexusWorkflow:
             
             return {
                 "messages": [{"role": "assistant", "content": response}],
-                "audit_trail": state.get("audit_trail", []) + audit_trail
+                "audit_trail": state.get("audit_trail", []) + audit_trail,
+                **state_updates
             }
 
         elif classification == "STRUCTURAL":
@@ -450,11 +497,13 @@ class NexusWorkflow:
                 "response": updated_response,
                 "messages": [{"role": "assistant", "content": updated_response}],
                 "pending_memory_updates": pending_updates,
-                "audit_trail": state.get("audit_trail", []) + [audit_msg]
+                "audit_trail": state.get("audit_trail", []) + [audit_msg] + audit_trail,
+                **state_updates
             }
 
         return {
-            "messages": [{"role": "assistant", "content": response}]
+            "messages": [{"role": "assistant", "content": response}],
+            **state_updates
         }
 
     def update_memory_node(self, state: AgentState) -> Dict[str, Any]:

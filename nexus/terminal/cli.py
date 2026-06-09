@@ -95,6 +95,15 @@ def main():
             print("REPONSE NEXUS :")
             print(final_state.get("response", "Aucune réponse générée."))
             print("-" * 50)
+
+            # Print working memory
+            wm = final_state.get("working_memory")
+            if wm:
+                print("\nMEMOIRE DE TRAVAIL (Working Memory) :")
+                print(f"  Profil utilisateur : {wm.get('user_profile', 'Inconnu')}")
+                print(f"  Tâches actives     : {', '.join(wm.get('current_tasks', [])) or 'Aucune'}")
+                print(f"  Bloc-notes (Self)  : {wm.get('scratchpad', 'Vide')}")
+                print("-" * 50)
             
             # Print audit trail (provenance)
             print("\nJOURNAL D'AUDIT (Chaîne de provenance) :")
@@ -153,10 +162,11 @@ def run_governance_menu(memory: HybridMemory, distill_loop: DistillationLoop, ou
         print("  3. Suppression d'un fait (Oubli forcé)")
         print("  4. Déclencher la Distillation (Consolidation cognitive)")
         print("  5. Déclencher le Nettoyage (Oubli LRU / Obsolescence)")
-        print("  6. Retour au Mode Interactif")
+        print("  6. Générer les résumés de communautés (GraphRAG)")
+        print("  7. Retour au Mode Interactif")
         print("=" * 60)
         
-        choice = input("Sélectionnez une option (1-6) > ").strip()
+        choice = input("Sélectionnez une option (1-7) > ").strip()
         
         if choice == "1":
             node_id = input("ID de l'entité (ex: john_doe) > ").strip()
@@ -221,12 +231,23 @@ def run_governance_menu(memory: HybridMemory, distill_loop: DistillationLoop, ou
                     print(f"  Résultat : {res['status']}. {res['message']}")
                 except ValueError:
                     print("  Age invalide.")
-                    
+
         elif choice == "6":
+            print("\n[GraphRAG] Détection de communautés et génération de résumés...")
+            res = distill_loop.run_community_summarization()
+            print(f"Statut : {res['status']}. Message : {res.get('message', '')}")
+            print(f"Communautés détectées : {res.get('communities_detected', 0)}")
+            print(f"Résumés générés : {res.get('summaries_generated', 0)}")
+            if res.get("audit_log"):
+                print("Journal d'audit de GraphRAG :")
+                for log in res["audit_log"]:
+                    print(f" - {log}")
+                    
+        elif choice == "7":
             print("Retour au mode interactif.")
             break
         else:
-            print("Option invalide. Veuillez saisir un nombre entre 1 et 6.")
+            print("Option invalide. Veuillez saisir un nombre entre 1 et 7.")
 
 if __name__ == "__main__":
     main()

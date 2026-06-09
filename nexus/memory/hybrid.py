@@ -250,10 +250,18 @@ class HybridMemory:
         
         retrieved_nodes: Dict[str, EntityNode] = {}
         retrieved_edges: List[RelationEdge] = []
+        retrieved_communities: List[VectorDocument] = []
         audit_trail: List[str] = []
 
         # Step 3: Fetch nodes from matched results
         for doc in matched_docs:
+            if doc.metadata and doc.metadata.get("type") == "community_summary":
+                retrieved_communities.append(doc)
+                audit_trail.append(
+                    f"[Provenance] Community summary match: '{doc.id}' retrieved via Hybrid Search."
+                )
+                continue
+
             node = self.graph_store.get_node(doc.id)
             if node:
                 # Update access count and timestamp for LRU policy
@@ -299,6 +307,13 @@ class HybridMemory:
 
         # Step 3: Format standard textual context
         context_blocks = []
+        
+        if retrieved_communities:
+            context_blocks.append("=== RETRIEVED COMMUNITY SUMMARIES (GLOBAL CONTEXT) ===")
+            for comm in retrieved_communities:
+                context_blocks.append(f"- {comm.text} [Community ID: {comm.metadata.get('community_id')}]")
+            context_blocks.append("")
+
         context_blocks.append("=== RETRIEVED FACTS ===")
         for nid, node in retrieved_nodes.items():
             text_val = node.properties.get("text", "")

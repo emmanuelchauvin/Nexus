@@ -14,6 +14,7 @@ export default function ChatPanel() {
   const [selectedAuditTrail, setSelectedAuditTrail] = useState(null);
   const [committing, setCommitting] = useState(false);
   const [commitResult, setCommitResult] = useState(null);
+  const [workingMemory, setWorkingMemory] = useState({ user_profile: 'Inconnu', current_tasks: [], scratchpad: 'Vide' });
   
   const messagesEndRef = useRef(null);
 
@@ -49,10 +50,23 @@ export default function ChatPanel() {
     fetchSessions();
   }, []);
 
+  const fetchWorkingMemory = async (sessionId) => {
+    try {
+      const response = await fetch(`http://localhost:8000/api/sessions/${sessionId}/working_memory`);
+      if (response.ok) {
+        const data = await response.json();
+        setWorkingMemory(data.working_memory);
+      }
+    } catch (e) {
+      console.error("Error fetching working memory:", e);
+    }
+  };
+
   const loadSession = async (sessionId) => {
     setCurrentSessionId(sessionId);
     setCommitResult(null);
     setSelectedAuditTrail(null);
+    fetchWorkingMemory(sessionId);
     try {
       const response = await fetch(`http://localhost:8000/api/sessions/${sessionId}`);
       if (response.ok) {
@@ -83,6 +97,7 @@ export default function ChatPanel() {
         const data = await response.json();
         setSessionsList(prev => [data, ...prev]);
         setCurrentSessionId(data.id);
+        setWorkingMemory({ user_profile: 'Inconnu', current_tasks: [], scratchpad: 'Vide' });
         setMessages([
           { role: 'assistant', content: 'Bonjour ! Je suis Nexus, votre agent à Mémoire Persistante Évolutive. Posez-moi des questions en lien avec mes connaissances, ou passez en mode Gouvernance pour alimenter ma mémoire.', auditTrail: [] }
         ]);
@@ -193,6 +208,9 @@ export default function ChatPanel() {
         content: data.response,
         auditTrail: data.audit_trail || []
       }]);
+      if (data.working_memory) {
+        setWorkingMemory(data.working_memory);
+      }
       
       // Update session title list if needed
       fetchSessions(currentSessionId);
@@ -271,6 +289,31 @@ export default function ChatPanel() {
               </div>
             );
           })}
+        </div>
+
+        {/* Working Memory display */}
+        <div style={{ borderTop: '1px solid rgba(255, 255, 255, 0.08)', paddingTop: '14px', marginTop: 'auto', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          <h3 style={{ fontSize: '0.82rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px', color: 'var(--primary)', margin: 0 }}>🧠 Mémoire de Travail</h3>
+          <div style={{ fontSize: '0.8rem', display: 'flex', flexDirection: 'column', gap: '8px', background: 'rgba(255, 255, 255, 0.01)', padding: '10px', borderRadius: '6px', border: '1px solid rgba(255, 255, 255, 0.04)' }}>
+            <div>
+              <span style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>Profil : </span>
+              <span style={{ color: 'var(--text-primary)' }}>{workingMemory.user_profile || 'Inconnu'}</span>
+            </div>
+            <div>
+              <span style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>Objectifs : </span>
+              <ul style={{ marginLeft: '12px', marginTop: '2px', paddingLeft: 0, listStyle: 'none' }}>
+                {workingMemory.current_tasks && workingMemory.current_tasks.length > 0 ? (
+                  workingMemory.current_tasks.map((t, i) => <li key={i} style={{ color: 'var(--text-primary)' }}>• {t}</li>)
+                ) : (
+                  <li style={{ color: 'var(--text-muted)' }}>Aucun objectif</li>
+                )}
+              </ul>
+            </div>
+            <div>
+              <span style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>Bloc-notes : </span>
+              <p style={{ margin: '2px 0 0 0', color: 'var(--text-primary)', fontStyle: 'italic', fontSize: '0.78rem', lineHeight: '1.3' }}>{workingMemory.scratchpad || 'Vide'}</p>
+            </div>
+          </div>
         </div>
       </div>
 

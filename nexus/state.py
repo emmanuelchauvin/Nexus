@@ -36,3 +36,7 @@ class AgentState(TypedDict):
     # The user's original query (saved before any reformulations)
     original_query: str
 
+    # The agent's dynamic working memory (user profile, current goals, notes)
+    working_memory: Dict[str, Any]
+
+

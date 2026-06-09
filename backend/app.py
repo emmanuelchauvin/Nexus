@@ -353,6 +353,8 @@ def run_query(request: QueryRequest):
         # If the session is stored in JSON but LangGraph checkpointer is empty (e.g. after server restart),
         # rebuild the LangGraph state.
         lg_state = graph_flow.get_state(config)
+        existing_wm = lg_state.values.get("working_memory") if lg_state.values else None
+        
         if session_data and (not lg_state.values or "messages" not in lg_state.values):
             lg_messages = []
             for msg in session_data.get("messages", []):
@@ -372,6 +374,8 @@ def run_query(request: QueryRequest):
             "audit_trail": [],
             "response": ""
         }
+        if existing_wm:
+            initial_state["working_memory"] = existing_wm
         
         final_state = graph_flow.invoke(initial_state, config=config)
         response_text = final_state.get("response", "No response generated.")
@@ -408,7 +412,8 @@ def run_query(request: QueryRequest):
 
         return {
             "response": response_text,
-            "audit_trail": final_state.get("audit_trail", [])
+            "audit_trail": final_state.get("audit_trail", []),
+            "working_memory": final_state.get("working_memory", {})
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Graph execution failed: {str(e)}")
@@ -734,3 +739,36 @@ def get_ignored_vulnerabilities():
     except Exception:
         # Fallback in case the local SecureCoder api port is offline
         return {"entries": []}
+
+
+@app.post("/api/distill/communities")
+def run_community_summarization():
+    """
+    Triggers Louvain community detection and LLM community summarization.
+    """
+    try:
+        res = distill_loop.run_community_summarization()
+        return res
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Community summarization failed: {str(e)}")
+
+
+@app.get("/api/sessions/{session_id}/working_memory")
+def get_session_working_memory(session_id: str):
+    """
+    Retrieves the current working memory associated with the given session.
+    """
+    config = {"configurable": {"thread_id": f"session_{session_id}"}}
+    try:
+        lg_state = graph_flow.get_state(config)
+        working_mem = lg_state.values.get("working_memory") if lg_state.values else None
+        if not working_mem:
+            working_mem = {
+                "user_profile": "Unknown user",
+                "current_tasks": [],
+                "scratchpad": "No active notes."
+            }
+        return {"working_memory": working_mem}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve working memory: {str(e)}")
+

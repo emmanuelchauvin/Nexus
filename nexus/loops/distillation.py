@@ -164,3 +164,92 @@ class DistillationLoop:
             "edges_added": len(new_edges),
             "audit_log": audit_log
         }
+
+    def run_community_summarization(self) -> Dict[str, Any]:
+        """
+        Runs community detection on the NetworkX graph and generates LLM summaries for each community,
+        storing them in ChromaDB.
+        """
+        nx_graph = self.memory.graph_store.graph
+        if not nx_graph or nx_graph.number_of_nodes() == 0:
+            return {"status": "skipped", "message": "Graph is empty."}
+
+        # Louvain requires undirected graph
+        undirected_g = nx_graph.to_undirected()
+        
+        try:
+            from networkx.algorithms.community import louvain_communities
+            communities = louvain_communities(undirected_g)
+        except Exception as e:
+            return {"status": "error", "message": f"Community detection failed: {str(e)}"}
+
+        audit_log = []
+        summaries_count = 0
+
+        for idx, community_nodes in enumerate(communities):
+            if not community_nodes:
+                continue
+            
+            # Gather nodes and edges details
+            nodes_details = []
+            for n_id in community_nodes:
+                node_data = self.memory.graph_store.get_node(n_id)
+                if node_data:
+                    nodes_details.append(
+                        f"Node ID: {node_data.id} ({node_data.type}) - {node_data.properties.get('text', '')}"
+                    )
+            
+            subgraph_edges = undirected_g.subgraph(community_nodes).edges(data=True)
+            edges_details = []
+            for u, v, data in subgraph_edges:
+                edges_details.append(f"{u} --({data.get('type', 'CONNECTED_TO')})--> {v}")
+
+            nodes_text = "\n".join(nodes_details)
+            edges_text = "\n".join(edges_details)
+
+            prompt = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are the Knowledge Graph Community Summarizer for Nexus.\n"
+                        "Analyze the provided set of connected entities and relationships belonging to a single community.\n"
+                        "Generate a concise, high-density summary paragraph describing the central theme, entities, "
+                        "and relationships of this community. Keep it informative and factual.\n"
+                        "Respond ONLY with the summary text, nothing else."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": f"Community Entities:\n{nodes_text}\n\nCommunity Relationships:\n{edges_text}"
+                }
+            ]
+
+            try:
+                summary_text = self.llm_client.generate(prompt, max_tokens=1000).strip()
+                community_id = f"community_{idx}"
+                
+                # Store community summary in ChromaDB
+                from nexus.memory.interfaces import VectorDocument
+                import json
+                doc = VectorDocument(
+                    id=community_id,
+                    text=f"Community Summary: {summary_text}",
+                    metadata={
+                        "type": "community_summary",
+                        "community_id": community_id,
+                        "nodes": json.dumps(list(community_nodes)),
+                        "timestamp": datetime.utcnow().isoformat()
+                    }
+                )
+                self.memory.vector_store.upsert(doc)
+                summaries_count += 1
+                audit_log.append(f"Generated summary for community {community_id} containing {len(community_nodes)} nodes.")
+            except Exception as e:
+                audit_log.append(f"Failed to generate summary for community index {idx}: {str(e)}")
+
+        return {
+            "status": "success",
+            "communities_detected": len(communities),
+            "summaries_generated": summaries_count,
+            "audit_log": audit_log
+        }

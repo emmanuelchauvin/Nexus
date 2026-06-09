@@ -27,9 +27,13 @@ from nexus.loops.oubli import OubliLoop
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 load_dotenv(os.path.join(project_root, ".env"), override=True)
 
+import ast
+
 def clean_and_parse_json(raw_text: str) -> dict:
     """
     Cleans markdown backticks and parses the JSON output of the LLM.
+    Supports standard JSON parsing with fallbacks for common LLM issues 
+    (single quotes, booleans, trailing commas).
     """
     cleaned = raw_text.strip()
     if cleaned.startswith("```"):
@@ -37,7 +41,25 @@ def clean_and_parse_json(raw_text: str) -> dict:
         if lines[0].startswith("```json") or lines[0].startswith("```"):
             lines = lines[1:-1]
         cleaned = "\n".join(lines).strip()
-    return json.loads(cleaned)
+    
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError as json_err:
+        try:
+            # Replace JS/JSON booleans/null with Python equivalents for ast.literal_eval
+            py_format = cleaned
+            py_format = py_format.replace(": true", ": True").replace(":true", ":True")
+            py_format = py_format.replace(": false", ": False").replace(":false", ":False")
+            py_format = py_format.replace(": null", ": None").replace(":null", ":None")
+            
+            res = ast.literal_eval(py_format)
+            if isinstance(res, dict):
+                return res
+        except Exception:
+            pass
+        
+        # If fallback also fails, raise the original JSON decode error
+        raise json_err
 
 app = FastAPI(
     title="Nexus API",
